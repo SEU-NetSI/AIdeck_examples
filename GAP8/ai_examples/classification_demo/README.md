@@ -18,7 +18,7 @@ While this example uses Makefiles the same steps could be achieved with any buil
 The process can be run to quantize the model in 16 or 8 bits weights and activations.
 
 ## Build and run without Docker
-*This example uses the SDK Version `3.7`.*
+*This example uses the SDK Version `3.8.1`*
 
 To build and run on GAP8:
 ```
