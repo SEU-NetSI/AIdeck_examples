@@ -60,26 +60,31 @@ class ImgThread(threading.Thread):
         print("Socket connected")
 
         imgdata = None
+        data_buffer = bytearray()
 
         while(1):
-            strng = client_socket.recv(512)
+            # Reveive image data from the AI-deck
+            data_buffer.extend(client_socket.recv(512))
 
             # Look for start-of-frame and end-of-frame
-            start_idx = strng.find(b"\xff\xd8")
-            end_idx = strng.find(b"\xff\xd9")
+            start_idx = data_buffer.find(b"\xff\xd8")
+            end_idx = data_buffer.find(b"\xff\xd9")
 
-            # Concatenate image data, once finished send it to the UI
-            if start_idx >= 0:
-                imgdata = strng[start_idx:len(strng)] # Does not support start and end in same package
-            elif end_idx >= 0 and imgdata:
-                imgdata += strng[0:end_idx]
+            # At startup we might get an end before we get the first start, if
+            # that is the case then throw away the data before start
+            if end_idx > -1 and end_idx < start_idx:
+                data_buffer = data_buffer[start_idx:]
+
+            # We have a start and an end of the image in the buffer now
+            if start_idx > -1 and end_idx > -1 and end_idx > start_idx:
+                # Pick out the image to render ...
+                imgdata = data_buffer[start_idx:end_idx + 2]
+                # .. and remove it from the buffer
+                data_buffer = data_buffer[end_idx + 2 :]
                 try:
                     self._callback(imgdata)
                 except gi.repository.GLib.Error:
-                    pass
-                imgdata = strng[end_idx:len(strng)]
-            elif imgdata:
-                imgdata += strng
+                    print("Error rendering image")
 
 # UI for showing frames from AI-deck example
 class FrameViewer(Gtk.Window):
@@ -91,7 +96,7 @@ class FrameViewer(Gtk.Window):
         self._start = None
         self.set_default_size(374, 294)
 
-    def init_ui(self):            
+    def init_ui(self):
         self.override_background_color(Gtk.StateType.NORMAL, Gdk.RGBA(0, 0, 0, 1))
         self.set_border_width(20)
         self.set_title("Connecting...")
@@ -112,16 +117,16 @@ class FrameViewer(Gtk.Window):
             fps = 1 / (time.time() - self._start)
             GLib.idle_add(self.set_title, "{:.1f} fps / {:.1f} kb".format(fps, len(imgdata)/1000))
         self._start = time.time()
-        img_loader = GdkPixbuf.PixbufLoader()
 
         # Try to decode JPEG from the data sent from the stream
         try:
+            img_loader = GdkPixbuf.PixbufLoader()
             img_loader.write(imgdata)
+            img_loader.close()
             pix = img_loader.get_pixbuf()
             GLib.idle_add(self._update_image, pix)
         except gi.repository.GLib.Error:
             print("Could not set image!")
-        img_loader.close()
 
 # Args for setting IP/port of AI-deck. Default settings are for when
 # AI-deck is in AP mode.
