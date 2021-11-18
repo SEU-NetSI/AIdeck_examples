@@ -24,7 +24,7 @@ def savelist(data_dir):
 	        sub_path = os.path.join(sub_dir + "\\" + image_name)
 	        # 操作每类图片
 	        image_paths.append(sub_path)
-	        image_labels.append(image_classes.index(sub_dir[38:]))
+	        image_labels.append(image_classes.index(sub_dir[len(data_dir)+1:]))
 
 
 	# 随机打乱
