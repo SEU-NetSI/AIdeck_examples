@@ -19,8 +19,6 @@
 #include "gaplib/ImgIO.h"
 
 //include periph
-#include "bsp/ram.h"
-#include "bsp/ram/hyperram.h"
 #include "bsp/bsp.h"
 #include "bsp/camera.h"
 #include "bsp/camera/himax.h"
@@ -40,9 +38,11 @@
 
 // Softmax always outputs Q15 short int even from 8 bit input
 L2_MEM short int *ResOut;
+//output result should be stored in L2 memory
+static PI_L2 uint32_t result;
 //Image in is unsigned but the model is trained with -1:1 inputs
 //The preprocessing to scale the image is done in the CNN AT graph
-static uint32_t l3_addr;
+
 uint8_t *imgBuffL2_TEMP;
 
 #define AT_INPUT_WIDTH  28
@@ -72,15 +72,16 @@ static void cluster()
   int rec_digit = 0;
   short int highest = ResOut[0];
   for(int i = 0; i < NUM_CLASSES; i++) {
-    printf("class %d: %d \n", i, ResOut[i]);
+    //printf("class %d: %d \n", i, ResOut[i]);
     if(ResOut[i] > highest) {
       highest = ResOut[i];
       rec_digit = i;
     }
   }
-  printf("\n");
+  result = rec_digit;
+  //printf("\n");
 
-  printf("Recognized: %d\n", rec_digit);
+  //printf("Recognized: %d\n", rec_digit);
 }
 
 
@@ -88,15 +89,6 @@ static int32_t open_camera_himax(struct pi_device *device)
 {
     struct pi_himax_conf cam_conf;
     pi_himax_conf_init(&cam_conf);
-
-#ifdef SLICE_MODE
-    cam_conf.roi.slice_en = 1;
-    cam_conf.roi.x = X;
-    cam_conf.roi.y = Y;
-    cam_conf.roi.w = CAMERA_WIDTH;
-    cam_conf.roi.h = CAMERA_HEIGHT;
-#endif
-
     pi_open_from_conf(device, &cam_conf);
     if (pi_camera_open(device))
     {
@@ -109,7 +101,7 @@ static int32_t open_camera_himax(struct pi_device *device)
     uint8_t reg_value;
 
     pi_camera_reg_set(device, IMG_ORIENTATION, &set_value);
-    pi_time_wait_us(100000);//0.1s
+    pi_time_wait_us(1000000);
     pi_camera_reg_get(device, IMG_ORIENTATION, &reg_value);
     if (set_value!=reg_value)
     {
@@ -129,20 +121,11 @@ int inference(void)
     printf("Entering main controller\n");
        
     struct pi_device cam;
-    struct pi_device ram;
-    struct pi_hyperram_conf ram_conf;
+    struct pi_device uart;
+    struct pi_uart_conf uart_conf;
+
     uint8_t *imgBuffL2;
     uint8_t *imgBuffL2_COLOR;
-    int32_t errors = 0;
-
-    printf("Open Hyperram\n");
-    pi_hyperram_conf_init(&ram_conf);
-    pi_open_from_conf(&ram, &ram_conf);
-    if (pi_ram_open(&ram))
-    {
-        printf("Error ram open !\n");
-        pmsis_exit(-1);
-    }
 
     printf("allocate buffer for L2\n");
     //alloc for camera buffer
@@ -168,31 +151,35 @@ int inference(void)
         pmsis_exit(-2);
     }
 
-    //alloc for inference picture
-    printf("allocate buffer for L3\n");
-    if (pi_ram_alloc(&ram, &l3_addr, (uint32_t) AT_INPUT_SIZE))
+
+    pi_uart_conf_init(&uart_conf);
+    uart_conf.enable_tx = 1;
+    uart_conf.enable_rx = 0;
+    uart_conf.baudrate_bps = 115200;
+    printf("Open UART\n");
+    pi_open_from_conf(&uart, &uart_conf);
+    if (pi_uart_open(&uart))
     {
-        printf("Ram malloc failed !\n");
+        printf("Uart open failed !\n");
         pmsis_exit(-3);
     }
 
+
     printf("Open Himax camera\n");
-    errors = open_camera_himax(&cam);
-    if (errors)
+    if (open_camera_himax(&cam))
     {
-        printf("Failed to open camera : %ld\n", errors);
+        printf("Failed to open camera\n");
         pmsis_exit(-4);
     }
 
     //use loop
-    //while(1)
-    //{
+    while(1)
+    {
         printf("Capture picture\n");
         pi_camera_control(&cam, PI_CAMERA_CMD_START, 0);
         pi_camera_capture(&cam, imgBuffL2, CAMERA_WIDTH*CAMERA_HEIGHT);
         pi_camera_control(&cam, PI_CAMERA_CMD_STOP, 0);
 
-        printf("convert to color image\n");
         demosaicking(imgBuffL2, imgBuffL2_COLOR, CAMERA_WIDTH, CAMERA_HEIGHT, 0);
         
         // Image Resize to [ AT_INPUT_HEIGHT x AT_INPUT_WIDTH x [R G B] ]
@@ -208,14 +195,10 @@ int inference(void)
         }
         printf("%d\n",ps);
         
-        WriteImageToFile("../../../img_raw.ppm", CAMERA_HEIGHT, CAMERA_WIDTH, sizeof(uint8_t), imgBuffL2, GRAY_SCALE_IO);
-        WriteImageToFile("../../../img_color.ppm", CAMERA_HEIGHT, CAMERA_WIDTH, sizeof(uint32_t), imgBuffL2_COLOR, RGB888_IO);
-        WriteImageToFile("../../../img_resize.ppm", AT_INPUT_HEIGHT, AT_INPUT_WIDTH, sizeof(uint32_t), imgBuffL2_TEMP, RGB888_IO);
+        // WriteImageToFile("../../../img_raw.ppm", CAMERA_HEIGHT, CAMERA_WIDTH, sizeof(uint8_t), imgBuffL2, GRAY_SCALE_IO);
+        // WriteImageToFile("../../../img_color.ppm", CAMERA_HEIGHT, CAMERA_WIDTH, sizeof(uint32_t), imgBuffL2_COLOR, RGB888_IO);
+        // WriteImageToFile("../../../img_resize.ppm", AT_INPUT_HEIGHT, AT_INPUT_WIDTH, sizeof(uint32_t), imgBuffL2_TEMP, RGB888_IO);
         
-        printf("Write image to L3\n");
-        pi_ram_write(&ram, l3_addr, imgBuffL2_TEMP, (uint32_t) AT_INPUT_WIDTH*AT_INPUT_HEIGHT*3);
-        WriteImageToFile("../../../img_l3.ppm", AT_INPUT_HEIGHT, AT_INPUT_WIDTH, sizeof(uint32_t), (uint8_t *)l3_addr, RGB888_IO);
-
     #ifdef PRINT_IMAGE
         for (int i=0; i<AT_INPUT_HEIGHT; i++)
         {
@@ -256,7 +239,7 @@ int inference(void)
         printf("Call cluster\n");
         struct pi_cluster_task task = {0};
         task.entry = cluster;
-        task.arg = NULL;
+        task.arg = &result;
         task.stack_size = (unsigned int) STACK_SIZE;
         task.slave_stack_size = (unsigned int) SLAVE_STACK_SIZE;
 
@@ -265,31 +248,34 @@ int inference(void)
         modelCNN_Destruct();
 
     #ifdef PERF  
-        {
-        unsigned int TotalCycles = 0, TotalOper = 0;
-        printf("\n");
-        for (int i=0; i<(sizeof(AT_GraphPerf)/sizeof(unsigned int)); i++) {
-            printf("%45s: Cycles: %10d, Operations: %10d, Operations/Cycle: %f\n", AT_GraphNodeNames[i], AT_GraphPerf[i], AT_GraphOperInfosNames[i], ((float) AT_GraphOperInfosNames[i])/ AT_GraphPerf[i]);
-            TotalCycles += AT_GraphPerf[i]; TotalOper += AT_GraphOperInfosNames[i];
-        }
-        printf("\n");
-        printf("%45s: Cycles: %10d, Operations: %10d, Operations/Cycle: %f\n", "Total", TotalCycles, TotalOper, ((float) TotalOper)/ TotalCycles);
-        printf("\n");
-        }
+        // {
+        // unsigned int TotalCycles = 0, TotalOper = 0;
+        // printf("\n");
+        // for (int i=0; i<(sizeof(AT_GraphPerf)/sizeof(unsigned int)); i++) {
+        //     printf("%45s: Cycles: %10d, Operations: %10d, Operations/Cycle: %f\n", AT_GraphNodeNames[i], AT_GraphPerf[i], AT_GraphOperInfosNames[i], ((float) AT_GraphOperInfosNames[i])/ AT_GraphPerf[i]);
+        //     TotalCycles += AT_GraphPerf[i]; TotalOper += AT_GraphOperInfosNames[i];
+        // }
+        // printf("\n");
+        // printf("%45s: Cycles: %10d, Operations: %10d, Operations/Cycle: %f\n", "Total", TotalCycles, TotalOper, ((float) TotalOper)/ TotalCycles);
+        // printf("\n");
+        // }
     #endif   
         pi_cluster_close(&cluster_dev);
+        printf("write result to crazyflie : %d\n",result);
+        
+        pi_uart_write(&uart, &result, 1);
 
-    //}
+
+    }
 
     // Close dev
     pmsis_l2_malloc_free(imgBuffL2, CAMERA_WIDTH*CAMERA_HEIGHT);
     pmsis_l2_malloc_free(imgBuffL2_COLOR, CAMERA_WIDTH*CAMERA_HEIGHT*3);
     pmsis_l2_malloc_free(imgBuffL2_TEMP, AT_INPUT_WIDTH*AT_INPUT_HEIGHT);
     AT_L2_FREE(0, ResOut, NUM_CLASSES * sizeof(short int));
-    pi_ram_free(&ram, l3_addr, (uint32_t) AT_INPUT_SIZE);
 
-    pi_ram_close(&ram);
     pi_camera_close(&cam);
+    pi_uart_close(&uart);
 
     printf("Ended\n");
 
